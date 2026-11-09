@@ -106,6 +106,24 @@ test('ffmpeg hints quote every input and output with the selected shell', () => 
   }
 });
 
+test('httpUrl rejects malformed and non-network inputs without throwing', () => {
+  const url = g('httpUrl');
+  for (const value of [null, undefined, {}, '', 'nope', '/relative', 'javascript:alert(1)', 'file:///a', 'https://a/\nb', 'https://u:p@a/']) assert.equal(url(value), null);
+  assert.equal(url('https://media.example/a.mp4?x=1').hostname, 'media.example');
+  assert.equal(url('http://localhost:8000/v').origin, 'http://localhost:8000');
+});
+test('mediaState rejects forged malformed state and copies only valid metadata', () => {
+  const normalize = g('mediaState');
+  for (const value of [null, {}, {eme: false, tracks: {}, blobs: []}, {eme: false, tracks: [{id:0}], blobs: []}]) assert.equal(normalize(value), null);
+  const input = {eme: true, tracks: [{id:0, mime:'video/mp4', bytes:5, chunks:1, extra:'ignored'}], blobs:[]};
+  const state = normalize(input);
+  assert.equal(state.eme, true);
+  assert.equal(state.tracks[0].extra, undefined);
+  input.tracks[0].bytes = 999;
+  assert.equal(state.tracks[0].bytes, 5);
+  assert.equal(normalize({eme:false, tracks:[], blobs: new Array(1025).fill({id:0,type:'video/mp4',size:1})}), null);
+});
+
 // --- all files parse
 test('all scripts pass node --check', () => {
   for (const f of fs.readdirSync('.').filter((x) => x.endsWith('.js') && x !== 'test.js')) cp.execFileSync('node', ['--check', f]);

@@ -104,9 +104,11 @@ chrome.webRequest.onHeadersReceived.addListener(
 
 /* ------------------------- direct file downloads ------------------------- */
 async function directDownload({ url, filename, tabId }) {
+  const parsed = httpUrl(url);
+  if (!parsed || typeof filename !== 'string' || !filename || !Number.isInteger(tabId)) throw new Error('Invalid media download URL or filename');
   const it = itemFor(await readTab(tabId), url) || { url, kind: 'mp4' };
   // -1 = requests not tied to a tab, which is what chrome.downloads makes.
-  const rids = await installRules(replayRules(replayHeaders(it), { tabId: -1, host: new URL(url).hostname }));
+  const rids = await installRules(replayRules(replayHeaders(it), { tabId: -1, host: parsed.hostname }));
   let id;
   try {
     id = await chrome.downloads.download({ url, filename, conflictAction: 'uniquify', saveAs: false });
@@ -148,16 +150,21 @@ chrome.downloads.onChanged.addListener((c) => {
 
 /* -------------------------------- messages -------------------------------- */
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg || typeof msg !== 'object') return;
   if (msg.type === MSG.MSE_STATE && sender.tab) {
+    const state = mediaState(msg.state);
+    if (!state) return;
     withTab(sender.tab.id, (d) => {
-      d.mse[sender.frameId] = msg.state;
+      d.mse[sender.frameId] = state;
     });
     return;
   }
   if (msg.type === MSG.DOM_MEDIA && sender.tab) {
+    if (!httpUrl(msg.url) || !['video', 'audio'].includes(msg.tag)) return;
     const url = cleanUrl(msg.url);
+    const page = httpUrl(sender.url) || httpUrl(sender.tab.url);
     withTab(sender.tab.id, (d) => {
-      d.items[url] = d.items[url] || { url, kind: msg.tag === 'audio' ? 'audio' : 'mp4', size: 0, frameId: sender.frameId, page: new URL(sender.url).origin, t: Date.now() };
+      d.items[url] = d.items[url] || { url, kind: msg.tag === 'audio' ? 'audio' : 'mp4', size: 0, frameId: sender.frameId, page: page ? page.origin : '', t: Date.now() };
     });
     return;
   }

@@ -17,6 +17,29 @@ const isWin = () => /win/i.test((navigator.userAgentData && navigator.userAgentD
 function ffmpegCommand(files, output, win) {
   return ['ffmpeg', ...files.flatMap((f) => ['-i', shellQuote(f, win)]), '-c', 'copy', shellQuote(output, win)].join(' ');
 }
+
+function httpUrl(value) {
+  if (typeof value !== 'string' || /[\x00-\x20\x7f]/.test(value)) return null;
+  try {
+    const u = new URL(value);
+    return /^https?:$/.test(u.protocol) && !u.username && !u.password ? u : null;
+  } catch { return null; }
+}
+
+// MAIN-world state is untrusted: a page can forge postMessage events. Copy only
+// bounded metadata; never let malformed arrays break the background or popup.
+function mediaState(value) {
+  if (!value || typeof value.eme !== 'boolean') return null;
+  const valid = (xs, text, fields) => Array.isArray(xs) && xs.length <= 1024 && xs.every((x) =>
+    x && typeof x[text] === 'string' && x[text].length <= 256 &&
+    fields.every((k) => Number.isSafeInteger(x[k]) && x[k] >= 0));
+  if (!valid(value.tracks, 'mime', ['id', 'bytes', 'chunks']) || !valid(value.blobs, 'type', ['id', 'size'])) return null;
+  return {
+    eme: value.eme,
+    tracks: value.tracks.map(({id, mime, bytes, chunks}) => ({id, mime, bytes, chunks})),
+    blobs: value.blobs.map(({id, type, size}) => ({id, type, size})),
+  };
+}
 // Expiry of a signed URL in ms (CloudFront "Expires", Akamai/Bunny "exp"/"expires", …), or 0.
 function expiryOf(u) {
   try {

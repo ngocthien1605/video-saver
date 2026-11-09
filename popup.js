@@ -49,9 +49,12 @@ function openDownloader(it) {
 }
 
 async function directDownload(it, btn) {
-  const m = /\.([a-z0-9]{2,4})$/i.exec(new URL(it.url).pathname);
+  try {
+  const parsed = httpUrl(it.url);
+  if (!parsed) throw new Error('Invalid media URL (expected HTTP or HTTPS)');
+  const m = /\.([a-z0-9]{2,4})$/i.exec(parsed.pathname);
   // Extensionless URLs (Drive /videoplayback): trust the MIME type (response header, else ?mime=).
-  const mime = (it.ct || new URL(it.url).searchParams.get('mime') || '').split(';')[0].trim().toLowerCase();
+  const mime = (it.ct || parsed.searchParams.get('mime') || '').split(';')[0].trim().toLowerCase();
   const ext = m ? m[1] : MIME_EXT[mime] || { mp4: 'mp4', webm: 'webm', audio: 'm4a' }[it.kind] || 'mp4';
   const title = safe((tab.title || '').replace(/ - Google Drive$/, ''));
   const r = await chrome.runtime.sendMessage({
@@ -59,6 +62,10 @@ async function directDownload(it, btn) {
   });
   btn.textContent = r && r.error ? 'Failed' : 'Started';
   if (r && r.error) btn.title = r.error;
+  } catch (e) {
+    btn.textContent = 'Failed';
+    btn.title = e.message;
+  }
 }
 
 /* ------------------------------ yt-dlp helper ------------------------------ */
@@ -158,6 +165,7 @@ function render(d) {
   mse.replaceChildren();
   let any = false;
   for (const [fid, st] of Object.entries(d.mse || {})) {
+    if (!mediaState(st)) continue;
     if (st.eme) {
       any = true;
       const w = document.createElement('div');

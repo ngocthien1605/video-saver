@@ -5,8 +5,10 @@
 //    player's. Used when the server answers 403 to direct requests.
 window.addEventListener('message', (e) => {
   if (e.source !== window || !e.data || e.data.__mdl !== 'state') return;
+  const state = mediaState(e.data.state);
+  if (!state) return;
   // After the extension reloads, this orphaned script throws synchronously ("context invalidated").
-  try { chrome.runtime.sendMessage({ type: MSG.MSE_STATE, state: e.data.state }).catch(() => {}); } catch {}
+  try { chrome.runtime.sendMessage({ type: MSG.MSE_STATE, state }).catch(() => {}); } catch {}
 });
 
 // Plain <video>/<audio> files the network sniffer can miss (cache, service worker, odd content types).
@@ -24,6 +26,7 @@ function toB64(u8) {
 }
 
 async function pageFetch({ url, range }) {
+  if (!httpUrl(url)) throw new Error('Invalid media URL (expected HTTP or HTTPS)');
   const headers = range ? { Range: `bytes=${range[0]}-${range[1]}` } : {};
   let r;
   try {
@@ -38,6 +41,7 @@ async function pageFetch({ url, range }) {
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg || typeof msg !== 'object') return;
   if (msg.type === MSG.MSE_CMD) {
     window.postMessage({ __mdlCmd: msg.cmd, ...(msg.args || {}) }, '*');
     return;
