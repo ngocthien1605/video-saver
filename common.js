@@ -40,6 +40,34 @@ function mediaState(value) {
     blobs: value.blobs.map(({id, type, size}) => ({id, type, size})),
   };
 }
+
+// Keep a Blob alive until the browser finishes reading it. Register before
+// starting, then search once to cover a completion before download() returns.
+async function downloadBlob(blob, options, downloads = chrome.downloads, urls = URL, lifecycle = globalThis) {
+  const url = urls.createObjectURL(blob);
+  let id, released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    downloads.onChanged.removeListener(changed);
+    lifecycle.removeEventListener('pagehide', release);
+    urls.revokeObjectURL(url);
+  };
+  const changed = (c) => {
+    if (c.id === id && c.state && c.state.current !== 'in_progress') release();
+  };
+  downloads.onChanged.addListener(changed);
+  lifecycle.addEventListener('pagehide', release, { once: true });
+  try {
+    id = await downloads.download({ ...options, url });
+    const [item] = await downloads.search({ id });
+    if (!item || item.state !== 'in_progress') release();
+    return { id, filename: item && item.filename };
+  } catch (e) {
+    release();
+    throw e;
+  }
+}
 // Expiry of a signed URL in ms (CloudFront "Expires", Akamai/Bunny "exp"/"expires", …), or 0.
 function expiryOf(u) {
   try {

@@ -161,6 +161,34 @@ test('replayRules confines custom secrets, subdomains, ports and scheme changes'
   assert.equal(g('replayRules')({cookie:'c=1'}, {tabId:7,host:'media.example',origin:'https://evil/'}).length, 0);
 });
 
+test('downloadBlob revokes on finish, interruption, API failure and page exit', async () => {
+  for (const mode of ['complete', 'interrupted', 'early', 'reject', 'search-error', 'pagehide']) {
+    const listeners = new Set(), exits = new Set(), revoked = [];
+    const downloads = {
+      onChanged: {addListener: f => listeners.add(f), removeListener: f => listeners.delete(f)},
+      download: async () => { if (mode === 'reject') throw Error('blocked'); return 8; },
+      search: async () => { if (mode === 'search-error') throw Error('search failed'); return [{state:mode === 'early' ? 'complete' : 'in_progress', filename:'actual.mp4'}]; },
+    };
+    const urls = {createObjectURL: () => 'blob:synthetic', revokeObjectURL: u => revoked.push(u)};
+    const lifecycle = {addEventListener: (n,f) => exits.add(f), removeEventListener: (n,f) => exits.delete(f)};
+    const pending = g('downloadBlob')({}, {filename:'v.mp4'}, downloads, urls, lifecycle);
+    if (['reject','search-error'].includes(mode)) await assert.rejects(pending);
+    else {
+      assert.equal((await pending).filename, 'actual.mp4');
+      if (mode !== 'early') {
+        assert.equal(revoked.length, 0, 'do not revoke an active download');
+        for (const fn of listeners) fn({id:9, state:{current:'complete'}});
+        assert.equal(revoked.length, 0, 'ignore unrelated downloads');
+        if (mode === 'pagehide') for (const fn of [...exits]) fn();
+        else for (const fn of [...listeners]) fn({id:8,state:{current:mode}});
+      }
+    }
+    assert.deepEqual(revoked, ['blob:synthetic'], mode);
+    assert.equal(listeners.size, 0);
+    assert.equal(exits.size, 0);
+  }
+});
+
 // --- all files parse
 test('all scripts pass node --check', () => {
   for (const f of fs.readdirSync('.').filter((x) => x.endsWith('.js') && x !== 'test.js')) cp.execFileSync('node', ['--check', f]);
