@@ -37,19 +37,19 @@ function updateBadge(tabId, d) {
   chrome.action.setBadgeBackgroundColor({ tabId, color: '#2563eb' }).catch(() => {});
 }
 
+// MV3 may discard these queues and reqHdrs when idle. Storage.session is the
+// source of captured data; a missing volatile header entry only loses headers
+// for that request. Outstanding API work is awaited; download records recover
+// on worker load instead of relying on in-memory settlement locks.
 const locks = new Map();
+const reportError = (e) => console.warn('[Stream Saver]', e);
 function withTab(tabId, fn) {
-  const prev = locks.get(tabId) || Promise.resolve();
-  const next = prev
-    .then(async () => {
+  return queueTask(locks, tabId, async () => {
       const d = await readTab(tabId);
       await fn(d);
       await writeTab(tabId, d);
       updateBadge(tabId, d);
-    })
-    .catch((e) => console.warn('[Stream Saver]', e));
-  locks.set(tabId, next);
-  return next;
+    }).catch(reportError);
 }
 
 /* -------- capture request headers (extraHeaders exposes Cookie/Referer) -------- */
@@ -70,6 +70,7 @@ chrome.webRequest.onSendHeaders.addListener(
   ['requestHeaders', 'extraHeaders']
 );
 chrome.webRequest.onErrorOccurred.addListener((d) => reqHdrs.delete(d.requestId), { urls: ['<all_urls>'] });
+chrome.webRequest.onCompleted.addListener((d) => reqHdrs.delete(d.requestId), { urls: ['<all_urls>'] });
 
 chrome.webRequest.onHeadersReceived.addListener(
   (det) => {
@@ -112,37 +113,34 @@ async function directDownload({ url, filename, tabId }) {
   let id;
   try {
     id = await chrome.downloads.download({ url, filename, conflictAction: 'uniquify', saveAs: false });
-  } catch (e) {
-    removeRules(rids);
-    throw e;
-  }
   await chrome.storage.session.set({
     ['dl_' + id]: { rids, url, tabId, frameId: it.frameId || 0, title: filename.replace(/\.[^.]+$/, ''), ext: (/\.([^.]+)$/.exec(filename) || [])[1] || 'mp4' },
   });
-  settle(id);
+  await settle(id);
   return { id };
+  } catch (e) {
+    await removeRules(rids);
+    throw e;
+  }
 }
 
 // Runs when a download ends. Also called right after the record is saved, because a
 // download that fails instantly can finish before the record exists.
-const settling = new Set();
-async function settle(id) {
+const settling = new Map();
+function settle(id) {
+  return queueTask(settling, id, async () => {
   const k = 'dl_' + id;
-  if (settling.has(id)) return;
-  settling.add(id);
-  try {
     const info = (await chrome.storage.session.get(k))[k];
+    if (!info) return;
     const [item] = await chrome.downloads.search({ id });
-    if (!info || !item || item.state === 'in_progress') return;
+    if (item && item.state === 'in_progress') return;
+    await removeRules(info.rids);
     await chrome.storage.session.remove(k);
-    removeRules(info.rids);
-    if (item.state !== 'interrupted' || item.error === 'USER_CANCELED') return;
+    if (!item || item.state !== 'interrupted' || item.error === 'USER_CANCELED') return;
     // Server refused the browser download (403 etc.): retry through the original tab.
     const q = new URLSearchParams({ url: info.url, kind: 'file', tab: info.tabId, frame: info.frameId, title: info.title, ext: info.ext, why: item.error || '' });
-    chrome.tabs.create({ url: chrome.runtime.getURL('downloader.html?' + q) });
-  } finally {
-    settling.delete(id);
-  }
+    await chrome.tabs.create({ url: chrome.runtime.getURL('downloader.html?' + q) });
+  }).catch(reportError);
 }
 chrome.downloads.onChanged.addListener((c) => {
   if (c.state && c.state.current !== 'in_progress') settle(c.id);
@@ -189,14 +187,33 @@ chrome.tabs.onUpdated.addListener((tabId, info) => {
   }
 });
 
-chrome.tabs.onRemoved.addListener(async (tabId) => {
-  removeTab(tabId);
-  locks.delete(tabId);
+async function cleanupTab(tabId) {
+  // A queued capture must not recreate the tab record after removal.
+  const pending = locks.get(tabId);
+  if (pending) await pending.catch(reportError);
+  await removeTab(tabId);
   // Header rules created by a downloader tab.
   const k = 'rules_' + tabId;
   const ids = (await chrome.storage.session.get(k))[k];
   if (ids) {
-    removeRules(ids);
-    chrome.storage.session.remove(k);
+    await removeRules(ids);
+    await chrome.storage.session.remove(k);
   }
-});
+}
+chrome.tabs.onRemoved.addListener((tabId) => { cleanupTab(tabId).catch(reportError); });
+
+async function reconcileDownloads() {
+  const records = await chrome.storage.session.get(null);
+  for (const [key, value] of Object.entries(records)) {
+    if (/^dl_\d+$/.test(key)) await settle(+key.slice(3));
+    if (/^rules_\d+$/.test(key)) {
+      try { await chrome.tabs.get(+key.slice(6)); }
+      catch {
+        await removeRules(value);
+        await chrome.storage.session.remove(key);
+      }
+    }
+  }
+}
+// Re-register listeners synchronously above; recovery also runs on idle wake.
+const recovery = reconcileDownloads().catch(reportError);

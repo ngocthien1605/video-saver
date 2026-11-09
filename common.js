@@ -26,6 +26,16 @@ function httpUrl(value) {
   } catch { return null; }
 }
 
+// Serialize read/modify/write work for one key and release settled closures.
+function queueTask(queues, key, fn) {
+  const previous = queues.get(key) || Promise.resolve();
+  const next = previous.catch(() => {}).then(fn);
+  queues.set(key, next);
+  const done = () => { if (queues.get(key) === next) queues.delete(key); };
+  next.then(done, done);
+  return next;
+}
+
 // MAIN-world state is untrusted: a page can forge postMessage events. Copy only
 // bounded metadata; never let malformed arrays break the background or popup.
 function mediaState(value) {

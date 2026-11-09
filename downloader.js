@@ -123,8 +123,9 @@ async function setupHeaders() {
   // Credentials only go to the host they were captured for.
   const ids = await installRules(replayRules(hdr, { tabId: me.id, host: parsed.hostname, origin: parsed.origin, anyHost: true }));
   if (!ids.length) return;
-  await chrome.storage.session.set({ [rk]: ids });
-  addEventListener('pagehide', () => removeRules(ids));
+  try { await chrome.storage.session.set({ [rk]: ids }); }
+  catch (e) { await removeRules(ids); throw e; }
+  addEventListener('pagehide', () => { removeRules(ids).catch(console.warn); }, { once: true });
   log(`Sending the page’s request headers: ${Object.keys(hdr).join(', ')}`);
 }
 

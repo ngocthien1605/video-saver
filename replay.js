@@ -43,4 +43,5 @@ async function installRules(rules) {
   if (rules.length) await chrome.declarativeNetRequest.updateSessionRules({ addRules: rules });
   return rules.map((r) => r.id);
 }
-const removeRules = (ids) => chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: ids }).catch(() => {});
+// Let callers retain their ownership record and retry cleanup if Chrome fails.
+const removeRules = (ids) => chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: ids });

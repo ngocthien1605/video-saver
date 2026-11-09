@@ -189,6 +189,102 @@ test('downloadBlob revokes on finish, interruption, API failure and page exit', 
   }
 });
 
+test('queueTask serializes work, recovers after errors, and releases settled keys', async () => {
+  const queues = new Map(), order = [], enqueue = g('queueTask');
+  let resume;
+  const blocked = new Promise(r => {resume=r;});
+  const first = enqueue(queues, 7, async () => {order.push('first'); await blocked; throw Error('failed');});
+  const failed = assert.rejects(first);
+  const second = enqueue(queues, 7, async () => {order.push('second');});
+  await Promise.resolve();
+  assert.equal(queues.size, 1);
+  resume();
+  await failed;
+  await second;
+  assert.deepEqual(order, ['first','second']);
+  assert.equal(queues.size, 0);
+});
+
+// Browser lifecycle tests use in-memory Chrome adapters, never a real profile.
+function backgroundHarness(initial = {}) {
+  const records = JSON.parse(JSON.stringify(initial)), rules = new Map(), warnings = [];
+  const event = () => ({listeners: [], addListener(fn) {this.listeners.push(fn);}, emit(...args) {return this.listeners.map(fn => fn(...args));}});
+  const webRequest = Object.fromEntries(['onSendHeaders','onHeadersReceived','onErrorOccurred','onCompleted'].map(n => [n,event()]));
+  let failStore = false, failRemoval = false;
+  const changed = event();
+  const chrome = {
+    storage: {session: {
+      get: async (k) => JSON.parse(JSON.stringify(k == null ? records : {[k]:records[k]})),
+      set: async (o) => {if (failStore && Object.keys(o).some(k => k.startsWith('dl_'))) throw Error('quota'); Object.assign(records, JSON.parse(JSON.stringify(o)));},
+      remove: async (k) => {delete records[k];},
+    }},
+    webRequest,
+    declarativeNetRequest: {updateSessionRules: async ({addRules=[],removeRuleIds=[]}) => {
+      if (failRemoval && removeRuleIds.length) throw Error('cleanup failed');
+      for (const rule of addRules) rules.set(rule.id,rule);
+      for (const id of removeRuleIds) rules.delete(id);
+    }},
+    action: {setBadgeText:async()=>{},setBadgeBackgroundColor:async()=>{}},
+    runtime: {onMessage:event(),getURL:s=>'chrome-extension://synthetic/'+s},
+    downloads: {
+      download:async()=>{ changed.emit({id:8,state:{current:'complete'}}); return 8; },
+      search:async()=>[{id:8,state:'complete'}],
+      onChanged:changed,
+    },
+    tabs: {onUpdated:event(),onRemoved:event(),get:async()=>{throw Error('tab closed');},create:async()=>({id:99})},
+  };
+  const context = vm.createContext({chrome, URL, console:{warn:(...a)=>warnings.push(a)}});
+  context.importScripts = (...names) => {for (const name of names) vm.runInContext(fs.readFileSync(name,'utf8'), context, {filename:name});};
+  vm.runInContext(fs.readFileSync('background.js','utf8'), context, {filename:'background.js'});
+  return {records,rules,chrome,warnings,run:s=>vm.runInContext(s,context),
+    failStore:()=>{failStore=true;}, failRemoval:value=>{failRemoval=value;}};
+}
+test('background tolerates lost request headers and malformed page messages', async () => {
+  const h = backgroundHarness();
+  await h.run('recovery');
+  h.chrome.runtime.onMessage.emit(null, {tab:{id:7}}, ()=>{});
+  h.chrome.runtime.onMessage.emit({type:'mse-state',state:null}, {tab:{id:7},frameId:0}, ()=>{});
+  h.chrome.runtime.onMessage.emit({type:'dom-media',url:'https://media.example/v.mp4',tag:'video'}, {tab:{id:7,url:'https://page.example/'},frameId:0}, ()=>{});
+  h.chrome.webRequest.onHeadersReceived.emit({requestId:'lost',tabId:7,frameId:0,statusCode:200,url:'https://media.example/v.mp4',responseHeaders:[]});
+  await h.run('Promise.all([...locks.values()])');
+  assert.equal(h.records.tab_7.items['https://media.example/v.mp4'].page, 'https://page.example');
+  assert.equal(h.warnings.length, 0);
+  await assert.rejects(h.run("directDownload({url:'bad',filename:'v.mp4',tabId:7})"), /Invalid media/);
+});
+test('background cleans completed downloads even when completion precedes record creation', async () => {
+  const h = backgroundHarness();
+  await h.run('recovery');
+  h.records.tab_7 = {items:{'https://media.example/v.mp4':{url:'https://media.example/v.mp4',hdr:{cookie:'synthetic'}}},mse:{}};
+  await h.run("directDownload({url:'https://media.example/v.mp4',filename:'v.mp4',tabId:7})");
+  assert.equal(h.rules.size, 0);
+  assert.equal(h.records.dl_8, undefined);
+  assert.equal(h.run('settling.size'), 0);
+  h.failStore();
+  await assert.rejects(h.run("directDownload({url:'https://media.example/v.mp4',filename:'v.mp4',tabId:7})"), /quota/);
+  assert.equal(h.rules.size, 0, 'storage failure must remove installed rules');
+});
+test('background recovery retries rule cleanup and removes orphaned tab records', async () => {
+  const h = backgroundHarness({dl_8:{rids:[41],url:'https://media.example/v.mp4'},rules_99:[42]});
+  await h.run('recovery');
+  assert.equal(h.records.dl_8, undefined);
+  assert.equal(h.records.rules_99, undefined);
+  h.records.dl_8 = {rids:[41]};
+  h.rules.set(41,{});
+  h.failRemoval(true);
+  await h.run('settle(8)');
+  assert.ok(h.records.dl_8, 'retain ownership when removal fails');
+  h.failRemoval(false);
+  await h.run('settle(8)');
+  assert.equal(h.records.dl_8, undefined);
+  assert.equal(h.rules.size, 0);
+  const first = h.run("withTab(7, d => { d.items.a = {url:'https://media.example/a'}; })");
+  const second = h.run("withTab(7, d => { d.items.b = {url:'https://media.example/b'}; })");
+  const closing = h.run('cleanupTab(7)');
+  await Promise.all([first,second,closing]);
+  assert.equal(h.records.tab_7, undefined, 'queued captures must not recreate closed tab storage');
+  assert.equal(h.run('locks.size'), 0);
+});
+
 // --- all files parse
 test('all scripts pass node --check', () => {
   for (const f of fs.readdirSync('.').filter((x) => x.endsWith('.js') && x !== 'test.js')) cp.execFileSync('node', ['--check', f]);
