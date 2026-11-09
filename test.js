@@ -137,6 +137,18 @@ test('freshestCapture orders by expiry first, timestamp only on ties', () => {
   assert.equal(find([{url:'https://other.example/v.m3u8',t:999}], base), null);
 });
 
+test('fetcher query inheritance preserves fragments and never crosses origin', async () => {
+  const seen = [];
+  const f = mk(async (u) => { seen.push(u); if (!new URL(u).search) throw E(403); return ok('s'); }, null);
+  await f.get('https://h/seg.ts#part');
+  assert.deepEqual(seen, ['https://h/seg.ts#part', 'https://h/seg.ts?sig=1#part']);
+  for (const url of ['http://h/seg.ts','https://other/seg.ts','https://h:444/seg.ts']) {
+    seen.length = 0;
+    await assert.rejects(f.get(url), {status:403});
+    assert.deepEqual(seen, [url]);
+  }
+});
+
 // --- all files parse
 test('all scripts pass node --check', () => {
   for (const f of fs.readdirSync('.').filter((x) => x.endsWith('.js') && x !== 'test.js')) cp.execFileSync('node', ['--check', f]);

@@ -12,8 +12,9 @@ function createFetcher({ ext, page, getMaster, log, sleep }) {
   function inheritQuery(url) {
     try {
       const u = new URL(url), m = new URL(getMaster());
-      if (u.search || !m.search || u.host !== m.host) return null;
-      return url + m.search;
+      if (u.search || !m.search || u.origin !== m.origin) return null;
+      u.search = m.search; // place signature before a fragment, not inside it
+      return u.href;
     } catch { return null; }
   }
 
