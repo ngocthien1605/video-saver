@@ -36,6 +36,12 @@ function queueTask(queues, key, fn) {
   return next;
 }
 
+function segmentCount(value) {
+  // A corrupt timeline must not create an infinite loop or an enormous array.
+  if (!Number.isSafeInteger(value) || value <= 0 || value > 1e6) throw new Error('Invalid or excessive DASH segment count');
+  return value;
+}
+
 // MAIN-world state is untrusted: a page can forge postMessage events. Copy only
 // bounded metadata; never let malformed arrays break the background or popup.
 function mediaState(value) {

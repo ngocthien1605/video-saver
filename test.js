@@ -285,6 +285,32 @@ test('background recovery retries rule cleanup and removes orphaned tab records'
   assert.equal(h.run('locks.size'), 0);
 });
 
+test('DASH rejects non-finite and excessive counts before allocating segments', () => {
+  const count = g('segmentCount');
+  for (const n of [0,-1,Infinity,NaN,1.5,1000001]) assert.throws(() => count(n), /segment count/);
+  assert.equal(count(1), 1);
+  assert.equal(count(1000000), 1000000);
+  // Exercise the actual segment builder with small fake XML nodes.
+  const source = fs.readFileSync('downloader.js','utf8');
+  const helpers = source.slice(source.indexOf('const kids ='), source.indexOf('function parseMPD'));
+  const builder = source.slice(source.indexOf('function segmentsFor'), source.indexOf('async function dashPrepare'));
+  vm.runInContext(helpers + builder, ctx);
+  const node = (name, attrs={}, children=[]) => ({
+    localName:name, children,
+    attributes:Object.entries(attrs).map(([name,value])=>({name,value:String(value)})),
+    getAttribute:k=>attrs[k] == null ? null : String(attrs[k]),
+    hasAttribute:k=>Object.hasOwn(attrs,k),
+  });
+  const representation = (duration, repeat) => ({
+    rep:node('Representation'), as:node('AdaptationSet'),
+    period:node('Period',{},[node('SegmentTemplate',{media:'s$Number$.m4s'},[node('SegmentTimeline',{},[node('S',{d:duration,r:repeat})])])]),
+    pDur:10, base:'https://media.example/', id:'v', bw:1,
+  });
+  assert.throws(()=>g('segmentsFor')(representation(0,-1)), /duration/);
+  assert.throws(()=>g('segmentsFor')(representation(1,1e9)), /segment count/);
+  assert.equal(g('segmentsFor')(representation(2,2)).segs.length, 3);
+});
+
 // --- all files parse
 test('all scripts pass node --check', () => {
   for (const f of fs.readdirSync('.').filter((x) => x.endsWith('.js') && x !== 'test.js')) cp.execFileSync('node', ['--check', f]);

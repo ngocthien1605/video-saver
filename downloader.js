@@ -568,6 +568,7 @@ function segmentsFor(r) {
     if (!A.media) throw new Error('SegmentTemplate has no media attribute');
     const ts = +(A.timescale || 1);
     const start = +(A.startNumber ?? 1);
+    if (!Number.isFinite(ts) || ts <= 0 || !Number.isSafeInteger(start) || start < 0) throw new Error('Invalid DASH timescale or start number');
     const fill = (s, num, time) =>
       s.replace(/\$(RepresentationID|Number|Time|Bandwidth)(?:%0(\d+)d)?\$/g, (_, k, w) => {
         const v = String(k === 'RepresentationID' ? r.id : k === 'Number' ? num : k === 'Time' ? time : r.bw);
@@ -581,11 +582,14 @@ function segmentsFor(r) {
       for (const S of kids(timeline, 'S')) {
         if (S.hasAttribute('t')) t = +S.getAttribute('t');
         const d = +S.getAttribute('d');
+        if (!Number.isFinite(t) || t < 0 || !Number.isFinite(d) || d <= 0) throw new Error('Invalid DASH timeline duration or time');
         let rep = +(S.getAttribute('r') || 0);
+        if (!Number.isSafeInteger(rep) || rep < -1) throw new Error('Invalid DASH timeline repeat');
         if (rep < 0) {
           if (!Number.isFinite(end)) throw new Error('Open-ended SegmentTimeline without a duration');
           rep = Math.ceil((end - t) / d) - 1;
         }
+        segmentCount(segs.length + segmentCount(rep + 1));
         for (let i = 0; i <= rep; i++) {
           segs.push({ uri: new URL(fill(A.media, num++, t), r.base).href });
           t += d;
@@ -593,8 +597,8 @@ function segmentsFor(r) {
       }
     } else {
       const d = +A.duration;
-      const count = Math.ceil((r.pDur * ts) / d);
-      if (!Number.isFinite(count) || count <= 0) throw new Error('Cannot determine segment count (no duration)');
+      if (!Number.isFinite(d) || d <= 0) throw new Error('Invalid DASH segment duration');
+      const count = segmentCount(Math.ceil((r.pDur * ts) / d));
       for (let i = 0; i < count; i++) segs.push({ uri: new URL(fill(A.media, start + i, i * d), r.base).href });
     }
     return { init, segs };
