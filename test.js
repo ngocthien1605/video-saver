@@ -13,14 +13,14 @@ test('replayHeaders derives Referer and Origin (browser downloads used to miss O
   assert.equal(h.origin, 'https://site.dev');
   assert.equal(h.cookie, 'a=1');
 });
-test('replayRules: cookie only to host; anyHost sends the rest everywhere', () => {
+test('replayRules: credentials stay on exact origin; public headers may follow media', () => {
   const r = g('replayRules')({ cookie: 'a=1', referer: 'https://x/' }, { tabId: 7, host: 'cdn.x', anyHost: true });
   assert.equal(r.length, 2);
   const general = r.find((x) => x.priority === 1), scoped = r.find((x) => x.priority === 2);
   assert.deepEqual(general.condition, { tabIds: [7] });
-  assert.deepEqual(scoped.condition, { tabIds: [7], requestDomains: ['cdn.x'] });
+  assert.deepEqual(scoped.condition, { tabIds: [7], regexFilter: '^https://cdn\\.x/' });
   assert.equal(scoped.action.requestHeaders[0].header, 'cookie');
-  assert.equal(g('replayRules')({ referer: 'https://x/' }, { tabId: -1, host: 'cdn.x' })[0].condition.requestDomains[0], 'cdn.x');
+  assert.equal(g('replayRules')({ referer: 'https://x/' }, { tabId: -1, host: 'cdn.x' })[0].condition.regexFilter, '^https://cdn\\.x/');
 });
 
 // --- captures (C)
@@ -147,6 +147,18 @@ test('fetcher query inheritance preserves fragments and never crosses origin', a
     await assert.rejects(f.get(url), {status:403});
     assert.deepEqual(seen, [url]);
   }
+});
+
+test('replayRules confines custom secrets, subdomains, ports and scheme changes', () => {
+  const rules = g('replayRules')({cookie:'c=1', authorization:'Bearer fake', 'x-api-key':'fake', 'X-Token':'fake', referer:'https://page/'},
+    {tabId:7, host:'media.example', origin:'https://media.example:8443', anyHost:true});
+  const secretRule = rules.find(r => r.priority === 2);
+  assert.deepEqual(Array.from(secretRule.action.requestHeaders, h => h.header), ['cookie','authorization','x-api-key','X-Token']);
+  const matches = new RegExp(secretRule.condition.regexFilter);
+  assert.ok(matches.test('https://media.example:8443/v.ts'));
+  for (const url of ['https://sub.media.example:8443/v.ts','http://media.example:8443/v.ts','https://media.example/v.ts','https://media.example:8443.evil/v.ts','https://evil/v.ts']) assert.ok(!matches.test(url), url);
+  assert.equal(g('replayRules')({cookie:'c=1'}, {tabId:7}).length, 0);
+  assert.equal(g('replayRules')({cookie:'c=1'}, {tabId:7,host:'media.example',origin:'https://evil/'}).length, 0);
 });
 
 // --- all files parse

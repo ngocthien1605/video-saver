@@ -118,10 +118,10 @@ async function setupHeaders() {
     if (item && item.frameId != null && !P.has('frame')) SRC_FRAME = item.frameId;
   }
   const hdr = replayHeaders(item, REFERER);
-  let host;
-  try { host = new URL(SRC).hostname; } catch {}
+  const parsed = httpUrl(SRC);
+  if (!parsed) throw new Error('Invalid media URL (expected HTTP or HTTPS)');
   // Credentials only go to the host they were captured for.
-  const ids = await installRules(replayRules(hdr, { tabId: me.id, host, anyHost: true }));
+  const ids = await installRules(replayRules(hdr, { tabId: me.id, host: parsed.hostname, origin: parsed.origin, anyHost: true }));
   if (!ids.length) return;
   await chrome.storage.session.set({ [rk]: ids });
   addEventListener('pagehide', () => removeRules(ids));

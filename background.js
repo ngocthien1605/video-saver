@@ -108,7 +108,7 @@ async function directDownload({ url, filename, tabId }) {
   if (!parsed || typeof filename !== 'string' || !filename || !Number.isInteger(tabId)) throw new Error('Invalid media download URL or filename');
   const it = itemFor(await readTab(tabId), url) || { url, kind: 'mp4' };
   // -1 = requests not tied to a tab, which is what chrome.downloads makes.
-  const rids = await installRules(replayRules(replayHeaders(it), { tabId: -1, host: parsed.hostname }));
+  const rids = await installRules(replayRules(replayHeaders(it), { tabId: -1, host: parsed.hostname, origin: parsed.origin }));
   let id;
   try {
     id = await chrome.downloads.download({ url, filename, conflictAction: 'uniquify', saveAs: false });

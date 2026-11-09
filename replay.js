@@ -14,16 +14,24 @@ function replayHeaders(item, fallbackReferer = '') {
 
 // declarativeNetRequest rules for those headers on requests from `tabId`.
 // Cookie/Authorization only ever go to `host`. Other headers go to `host` too, unless anyHost.
-function replayRules(hdr, { tabId, host, anyHost = false }) {
+function replayRules(hdr, { tabId, host, origin, anyHost = false }) {
+  const parsed = httpUrl(origin || ('https://' + host + '/'));
+  if (!host || !parsed || parsed.hostname !== host) return [];
+  const escape = (s) => s.replace(/[.*+?^$()|[\]{}\\]/g, '\\$&');
+  // requestDomains includes subdomains. Anchor the exact origin as well, so a
+  // redirect/subdomain, different port or HTTPS downgrade cannot receive auth.
+  const exactOrigin = '^' + escape(parsed.origin) + '/';
   const general = [], scoped = [];
   for (const [header, value] of Object.entries(hdr)) {
-    ((header === 'cookie' || header === 'authorization' || !anyHost) ? scoped : general).push({ header, operation: 'set', value });
+    // Unknown headers may contain secrets (e.g. X-API-Key); scope them too.
+    const publicHeader = /^(referer|origin|user-agent)$/.test(header.toLowerCase());
+    ((anyHost && publicHeader) ? general : scoped).push({ header, operation: 'set', value });
   }
   const rule = (priority, requestHeaders, scopedToHost) => ({
     id: 1 + Math.floor(Math.random() * 2e9),
     priority,
     action: { type: 'modifyHeaders', requestHeaders },
-    condition: { tabIds: [tabId], ...(scopedToHost && { requestDomains: [host] }) },
+    condition: { tabIds: [tabId], ...(scopedToHost && { regexFilter: exactOrigin }) },
   });
   const rules = [];
   if (general.length) rules.push(rule(1, general, false));
