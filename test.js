@@ -124,6 +124,19 @@ test('mediaState rejects forged malformed state and copies only valid metadata',
   assert.equal(normalize({eme:false, tracks:[], blobs: new Array(1025).fill({id:0,type:'video/mp4',size:1})}), null);
 });
 
+test('freshestCapture orders by expiry first, timestamp only on ties', () => {
+  const find = g('freshestCapture'), base = 'https://cdn.example/v.m3u8';
+  const later = {url:base+'?Expires=2000000000&sig=a', t:1};
+  const newer = {url:base+'?Expires=1900000000&sig=b', t:100};
+  const tie = {url:base+'?Expires=2000000000&sig=c', t:2};
+  const unknown = {url:base+'?sig=d', t:200};
+  for (const values of [[later,newer,unknown], [unknown,newer,later]]) assert.equal(find(values, base), later);
+  assert.equal(find([later,tie], base), tie);
+  assert.equal(find([tie,later], base), tie);
+  assert.equal(find([tie], tie.url), null);
+  assert.equal(find([{url:'https://other.example/v.m3u8',t:999}], base), null);
+});
+
 // --- all files parse
 test('all scripts pass node --check', () => {
   for (const f of fs.readdirSync('.').filter((x) => x.endsWith('.js') && x !== 'test.js')) cp.execFileSync('node', ['--check', f]);

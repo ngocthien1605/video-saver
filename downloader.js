@@ -22,21 +22,13 @@ let stopFlag = false;
 let MASTER = SRC; // current (freshest) signed URL of the manifest
 
 /* ------------------- signed / expiring links (CloudFront etc.) ------------------- */
-const pathKey = (u) => {
-  try { const x = new URL(u); return x.origin + x.pathname; } catch { return u; }
-};
 const clock = (ms) => new Date(ms).toLocaleTimeString();
 
 // Newest URL with the same path that the video tab has requested since (new signature).
 async function newestCapture(u) {
   if (SRC_TAB == null) return null;
   const d = await readTab(SRC_TAB);
-  const key = pathKey(u);
-  let best = null;
-  for (const it of Object.values(d.items)) {
-    if (it.url === u || pathKey(it.url) !== key) continue;
-    if (!best || expiryOf(it.url) > expiryOf(best.url) || (it.t || 0) > (best.t || 0)) best = it;
-  }
+  const best = freshestCapture(d.items, u);
   return best && best.url;
 }
 

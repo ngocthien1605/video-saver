@@ -19,3 +19,20 @@ const writeTab = (id, d, store = chrome.storage.session) => store.set({ [tabKey(
 const removeTab = (id, store = chrome.storage.session) => store.remove(tabKey(id));
 // Look an item up by any spelling of its URL.
 const itemFor = (d, url) => d.items[cleanUrl(url)] || d.items[url];
+
+const pathKey = (u) => {
+  try { const x = new URL(u); return x.origin + x.pathname; } catch { return u; }
+};
+
+// Prefer longest validity, then latest capture. Unknown expiry sorts as zero;
+// do not replace a known later expiry just because a shorter link arrived last.
+function freshestCapture(items, url) {
+  const key = pathKey(url);
+  let best = null;
+  for (const it of Object.values(items)) {
+    if (it.url === url || pathKey(it.url) !== key) continue;
+    const exp = expiryOf(it.url), prev = best ? expiryOf(best.url) : -1;
+    if (!best || exp > prev || (exp === prev && (it.t || 0) > (best.t || 0))) best = it;
+  }
+  return best;
+}
