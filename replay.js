@@ -13,7 +13,8 @@ function replayHeaders(item, fallbackReferer = '') {
 }
 
 // declarativeNetRequest rules for those headers on requests from `tabId`.
-// Cookie/Authorization only ever go to `host`. Other headers go to `host` too, unless anyHost.
+// Secrets stay on the exact captured origin; only browser-context headers may
+// follow cross-host media when anyHost is enabled.
 function replayRules(hdr, { tabId, host, origin, anyHost = false }) {
   const parsed = httpUrl(origin || ('https://' + host + '/'));
   if (!host || !parsed || parsed.hostname !== host) return [];
