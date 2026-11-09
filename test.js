@@ -88,7 +88,7 @@ test('quoting: PowerShell and POSIX preserve payloads as single literal argument
   const quote = g('shellQuote');
   for (const p of payloads) {
     const stripped = p.replace(/[\x00-\x1f\x7f-\x9f\u2028\u2029]/g, '');
-    assert.equal(quote(p, true), "'" + stripped.replace(/'/g, "''") + "'");
+    assert.equal(quote(p, true), "'" + stripped.replace(/['\u2018-\u201b]/g, '$&$&') + "'");
     assert.equal(quote(p, false), "'" + stripped.replace(/'/g, "'\\''") + "'");
     for (const win of [true, false]) {
       const c = g('ytdlpStreamCommand')({ item: { url: p, hdr: { 'x-token': p } }, tabUrl: '', title: p, ua: p, cookiePath: p, win });
@@ -323,6 +323,14 @@ test('MAIN-world media controls ignore malformed commands without claiming authe
   listeners.message({source:window,data:{__mdlCmd:'turbo'}});
   assert.equal(media.muted, true);
   assert.equal(media.playbackRate, 16);
+});
+
+test('PowerShell quoting escapes every Unicode single-quote delimiter', () => {
+  for (const quote of ["'",'\u2018','\u2019','\u201a','\u201b']) {
+    const payload = 'x' + quote + '; $(calc); #';
+    assert.equal(g('shellQuote')(payload, true), "'x" + quote + quote + "; $(calc); #'");
+    assert.equal(g('shellQuote')(quote, false), quote === "'" ? "''\\'''" : "'" + quote + "'");
+  }
 });
 
 // --- all files parse

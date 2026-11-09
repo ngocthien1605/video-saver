@@ -11,7 +11,8 @@ const safe = (s) =>
 // and single-line; file-name sanitizing alone is not shell quoting.
 const shellQuote = (s, win) => {
   const value = String(s).replace(/[\x00-\x1f\x7f-\x9f\u2028\u2029]/g, '');
-  return "'" + value.replace(/'/g, win ? "''" : "'\\''") + "'";
+  // PowerShell also recognizes Unicode smart apostrophes as delimiters.
+  return "'" + (win ? value.replace(/['\u2018-\u201b]/g, '$&$&') : value.replace(/'/g, "'\\''")) + "'";
 };
 const isWin = () => /win/i.test((navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform);
 function ffmpegCommand(files, output, win) {
