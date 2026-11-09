@@ -1,7 +1,5 @@
 'use strict';
-// Builds yt-dlp commands. Pure: every shell-quoting decision lives here.
-const shellQuote = (s, win) =>
-  win ? '"' + String(s).replace(/"/g, '\\"') + '"' : "'" + String(s).replace(/'/g, "'\\''") + "'";
+// Builds yt-dlp commands using common.js's PowerShell / POSIX argument quoting.
 
 // A captured stream: replays the page's headers + exported cookies file.
 function ytdlpStreamCommand({ item, tabUrl, title, ua, cookiePath, win }) {

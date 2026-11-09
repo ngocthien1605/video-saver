@@ -12,6 +12,7 @@
   </header>
   <div id="out" hidden>
     <h2>yt-dlp command <small>(copied)</small></h2>
+    <p class="hint">On Windows, paste commands into <b>PowerShell</b> (not cmd.exe). On macOS/Linux, use a POSIX shell.</p>
     <textarea id="cmd" readonly rows="5"></textarea>
     <p class="hint">Signed links (<code>?Expires=…&amp;Signature=…</code>) can expire within minutes, and yt-dlp can't renew them partway through a download. For long videos, use the <b>Open</b> button instead, which fetches fresh links automatically. Run it within a few minutes (signed links expire), on this same computer and network. The cookies file holds your login cookies, so keep it private and delete it afterwards. If you still get a 403, the site is probably checking the browser's network fingerprint. In that case, install <code>pip install "yt-dlp[default,curl-cffi]"</code> and add <code>--impersonate chrome</code>, or use the extension's <b>Open</b> or <b>Download</b> button instead.</p>
   </div>

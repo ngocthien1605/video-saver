@@ -83,6 +83,29 @@ test('ytdlp: % in the title is escaped for the -o template', () => {
   assert.ok(c.includes("'100%% Real.%(ext)s'"), c);
 });
 
+test('quoting: PowerShell and POSIX preserve payloads as single literal arguments', () => {
+  const payloads = ['$(calc)', '`id`', '& calc', '"; calc; "', "'", '%PATH%', '$var', 'a\nb\rc\u0000d\u007fe\u0085f\u2028g'];
+  const quote = g('shellQuote');
+  for (const p of payloads) {
+    const stripped = p.replace(/[\x00-\x1f\x7f-\x9f\u2028\u2029]/g, '');
+    assert.equal(quote(p, true), "'" + stripped.replace(/'/g, "''") + "'");
+    assert.equal(quote(p, false), "'" + stripped.replace(/'/g, "'\\''") + "'");
+    for (const win of [true, false]) {
+      const c = g('ytdlpStreamCommand')({ item: { url: p, hdr: { 'x-token': p } }, tabUrl: '', title: p, ua: p, cookiePath: p, win });
+      assert.ok(c.includes(quote(p, win)) && c.includes(quote('x-token:' + p, win)), c);
+      assert.ok(!/[\x00-\x1f\x7f-\x9f\u2028\u2029]/.test(c), c);
+      assert.ok(g('ytdlpPageCommand')({url: p, win}).endsWith(quote(p, win)));
+    }
+  }
+});
+test('ffmpeg hints quote every input and output with the selected shell', () => {
+  const input = "a' $(calc) `id` & %PATH%\n.ts", output = '$(calc).mp4';
+  for (const win of [true, false]) {
+    const q = (s) => g('shellQuote')(s, win);
+    assert.equal(g('ffmpegCommand')([input, 'audio.m4a'], output, win), `ffmpeg -i ${q(input)} -i ${q('audio.m4a')} -c copy ${q(output)}`);
+  }
+});
+
 // --- all files parse
 test('all scripts pass node --check', () => {
   for (const f of fs.readdirSync('.').filter((x) => x.endsWith('.js') && x !== 'test.js')) cp.execFileSync('node', ['--check', f]);

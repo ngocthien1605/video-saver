@@ -107,8 +107,6 @@ async function exportCookies(it) {
   return 'stream-saver-cookies.txt';
 }
 
-const isWin = () => /win/i.test((navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform);
-
 async function ytdlp(it, btn) {
   btn.textContent = '…';
   try {

@@ -213,7 +213,7 @@ function addSelect(label, options, withNone) {
 function mergeHint(files) {
   const [v, a] = files;
   log('To merge video + audio into one file:');
-  log(`ffmpeg -i "${v}" -i "${a}" -c copy "${TITLE}.merged.mp4"`, 'cmd');
+  log(ffmpegCommand([v, a], `${TITLE}.merged.mp4`, isWin()), 'cmd');
 }
 
 /* ------------------------------ direct file ------------------------------ */
@@ -375,7 +375,7 @@ async function hlsPrepare() {
 
 function tsHint(f) {
   log('Optional: remux the .ts into .mp4 without re-encoding:');
-  log(`ffmpeg -i "${f}" -c copy "${f.replace(/\.ts$/, '.mp4')}"`, 'cmd');
+  log(ffmpegCommand([f], f.replace(/\.ts$/, '.mp4'), isWin()), 'cmd');
 }
 
 async function hlsTrack(t, suffix) {
