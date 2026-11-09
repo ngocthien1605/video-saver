@@ -43,7 +43,8 @@ async function pageFetch({ url, range }) {
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || typeof msg !== 'object') return;
   if (msg.type === MSG.MSE_CMD) {
-    window.postMessage({ __mdlCmd: msg.cmd, ...(msg.args || {}) }, '*');
+    if (!['save-track', 'save-blob', 'turbo', 'reset'].includes(msg.cmd)) return;
+    window.postMessage({ ...(msg.args || {}), __mdlCmd: msg.cmd }, '*');
     return;
   }
   if (msg.type === MSG.PAGE_FETCH) {

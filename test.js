@@ -311,6 +311,20 @@ test('DASH rejects non-finite and excessive counts before allocating segments', 
   assert.equal(g('segmentsFor')(representation(2,2)).segs.length, 3);
 });
 
+test('MAIN-world media controls ignore malformed commands without claiming authentication', () => {
+  const listeners = {}, media = {play:async()=>{}};
+  const window = {addEventListener:(name,fn)=>{listeners[name]=fn;}};
+  const context = vm.createContext({window, URL:class extends URL {static createObjectURL(){return 'blob:fake';}},
+    document:{addEventListener(){},querySelectorAll:()=>[media]}});
+  vm.runInContext(fs.readFileSync('inject.js','utf8'), context);
+  for (const data of [{__mdlCmd:'save-track',name:{}},{__mdlCmd:'save-blob',id:-1},{__mdlCmd:'unknown'},null]) {
+    assert.doesNotThrow(()=>listeners.message({source:window,data}));
+  }
+  listeners.message({source:window,data:{__mdlCmd:'turbo'}});
+  assert.equal(media.muted, true);
+  assert.equal(media.playbackRate, 16);
+});
+
 // --- all files parse
 test('all scripts pass node --check', () => {
   for (const f of fs.readdirSync('.').filter((x) => x.endsWith('.js') && x !== 'test.js')) cp.execFileSync('node', ['--check', f]);

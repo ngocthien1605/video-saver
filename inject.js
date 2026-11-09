@@ -126,6 +126,12 @@
   window.addEventListener('message', (e) => {
     const m = e.data;
     if (e.source !== window || !m || m.__mdlCmd == null) return;
+    // MAIN-world messages are observable/forgeable by the page. A token sent
+    // over this same channel would not authenticate the extension. Validate
+    // input, but do not treat these media-only controls as a security boundary.
+    if (!['save-track', 'save-blob', 'turbo', 'reset'].includes(m.__mdlCmd)) return;
+    if (m.name != null && typeof m.name !== 'string') return;
+    if (m.__mdlCmd.startsWith('save-') && (!Number.isSafeInteger(m.id) || m.id < 0)) return;
     const base = (m.name || 'capture').replace(/[\\/:*?"<>|]+/g, ' ').trim().slice(0, 100) || 'capture';
 
     if (m.__mdlCmd === 'save-track') {
