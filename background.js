@@ -11,6 +11,10 @@ const MIN_FILE_SIZE = 512 * 1024;
 const SEGMENT_RE = /\.(m4s|ts|m4f|cmfv|cmfa|aac)(\?|#|$)/i;
 // Headers that are browser plumbing, not auth — never replayed.
 const SKIP_HDR = /^(host|connection|accept|accept-encoding|accept-language|range|content-length|content-type|cache-control|pragma|priority|dnt|te|upgrade-insecure-requests|if-.*|sec-.*)$/;
+// Download interruptions the page-fetch fallback can recover from. Refusals need
+// the page's own session; SERVER_NO_RANGE needs re-fetching without Range. Disk
+// and network failures would fail there too, so they are excluded.
+const RETRYABLE_DL_ERROR = /^(SERVER_FORBIDDEN|SERVER_UNAUTHORIZED|SERVER_NO_RANGE|NETWORK_INVALID_REQUEST)$/;
 
 function classify(url, ct = '') {
   const u = url.toLowerCase();
@@ -137,6 +141,9 @@ function settle(id) {
     await removeRules(info.rids);
     await chrome.storage.session.remove(k);
     if (!item || item.state !== 'interrupted' || item.error === 'USER_CANCELED') return;
+    // Only a refused request is worth retrying through the video tab. Disk-full,
+    // timeouts and size limits would fail there too, so don't open a doomed tab.
+    if (!RETRYABLE_DL_ERROR.test(item.error || '')) return;
     // Server refused the browser download (403 etc.): retry through the original tab.
     const q = new URLSearchParams({ url: info.url, kind: 'file', tab: info.tabId, frame: info.frameId, title: info.title, ext: info.ext, why: item.error || '' });
     await chrome.tabs.create({ url: chrome.runtime.getURL('downloader.html?' + q) });

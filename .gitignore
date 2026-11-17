@@ -1,3 +1,6 @@
 .claude/
+.commandcode/
 .DS_Store
 stream-saver-cookies*.txt
+node_modules/
+*.bak

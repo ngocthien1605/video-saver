@@ -1,0 +1,48 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Parse and unit tests
+        run: node test.js
+
+  manifest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Validate manifest and check shipped files exist
+        run: |
+          node -e '
+          const fs = require("fs");
+          const m = JSON.parse(fs.readFileSync("manifest.json", "utf8"));
+          const files = new Set([
+            m.background.service_worker,
+            m.action.default_popup,
+            ...Object.values(m.icons || {}),
+            ...Object.values(m.action.default_icon || {}),
+            ...m.content_scripts.flatMap((cs) => cs.js),
+          ]);
+          const missing = [...files].filter((f) => !fs.existsSync(f));
+          if (missing.length) {
+            console.error("Missing files referenced by manifest.json:", missing);
+            process.exit(1);
+          }
+          if (!m.minimum_chrome_version) {
+            console.error("manifest.json should declare minimum_chrome_version");
+            process.exit(1);
+          }
+          console.log("manifest ok:", files.size, "referenced files present");
+          '

@@ -87,15 +87,41 @@
   }
   document.addEventListener('encrypted', markEme, true);
 
+  // Like the track buffer above, retained Blobs are capped so a long session
+  // cannot exhaust memory. Memory stays bounded by evicting the oldest entries.
+  const BLOB_CAP = 512 * 1024 * 1024;
+  let blobBytes = 0;
+  let blobSeq = 0;
+  const evictBlobs = () => {
+    while (blobBytes > BLOB_CAP && S.blobs.length) {
+      blobBytes -= S.blobs.shift().size || 0;
+    }
+  };
   URL.createObjectURL = function (obj) {
     const url = origCreateURL.apply(this, arguments);
     try {
-      if (obj instanceof Blob && /^(video|audio)\//i.test(obj.type)) {
-        S.blobs.push({ id: S.blobs.length, blob: obj, url });
+      if (obj instanceof Blob && /^(video|audio)\//i.test(obj.type) && obj.size <= BLOB_CAP) {
+        // ids are monotonic: entries can be evicted, so an id never changes meaning.
+        S.blobs.push({ id: blobSeq++, blob: obj, url, size: obj.size });
+        blobBytes += obj.size;
+        evictBlobs();
         post();
       }
     } catch (e) {}
     return url;
+  };
+
+  // Revoking an object URL only invalidates that handle. The Blob itself stays
+  // valid and saveable (saveBlob mints a fresh URL), and players routinely
+  // revoke as soon as the media element has loaded, so this must NOT drop the
+  // capture. Only the dead handle is cleared.
+  const origRevokeURL = URL.revokeObjectURL;
+  URL.revokeObjectURL = function (url) {
+    try {
+      const b = S.blobs.find((x) => x.url === url);
+      if (b) b.url = null;
+    } catch (e) {}
+    return origRevokeURL.apply(this, arguments);
   };
 
   const extFor = (mime) => {
@@ -140,7 +166,7 @@
       const kind = /^audio/i.test(t.mime) ? 'audio' : 'video';
       saveBlob(new Blob(t.chunks, { type: t.mime.split(';')[0] }), `${base}.${kind}${t.id}.${extFor(t.mime)}`);
     } else if (m.__mdlCmd === 'save-blob') {
-      const b = S.blobs[m.id];
+      const b = S.blobs.find((x) => x.id === m.id);
       if (b && !S.eme) saveBlob(b.blob, `${base}.${extFor(b.blob.type)}`);
     } else if (m.__mdlCmd === 'turbo') {
       for (const v of document.querySelectorAll('video, audio')) {

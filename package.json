@@ -1,0 +1,11 @@
+{
+  "name": "stream-saver",
+  "version": "1.2.2",
+  "private": true,
+  "description": "Chrome/Edge MV3 extension that detects and saves MP4/WebM, HLS and DASH streams.",
+  "scripts": {
+    "test": "node test.js",
+    "check": "node test.js"
+  },
+  "license": "UNLICENSED"
+}
