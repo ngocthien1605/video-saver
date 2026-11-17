@@ -277,7 +277,7 @@ test('background cleans completed downloads even when completion precedes record
   await assert.rejects(h.run("directDownload({url:'https://media.example/v.mp4',filename:'v.mp4',tabId:7})"), /quota/);
   assert.equal(h.rules.size, 0, 'storage failure must remove installed rules');
 });
-test('background only retries refusals through the video tab, never disk or network failures', async () => {
+test('background retries recoverable interruptions through the video tab, not fatal ones', async () => {
   const h = backgroundHarness();
   await h.run('recovery');
   const interrupted = async (error) => {
@@ -286,10 +286,16 @@ test('background only retries refusals through the video tab, never disk or netw
     await h.run('settle(8)');
     return h.createdTabs();
   };
-  assert.equal(await interrupted('SERVER_FORBIDDEN'), 1, 'a refusal opens the fallback tab');
-  assert.equal(await interrupted('SERVER_UNAUTHORIZED'), 2);
-  for (const error of ['FILE_NO_SPACE', 'NETWORK_TIMEOUT', 'FILE_TOO_LARGE', 'USER_CANCELED', 'SERVER_NO_RANGE']) {
-    assert.equal(await interrupted(error), 2, `${error} must not open a doomed retry tab`);
+  // Recoverable: refusals need the page's session; SERVER_NO_RANGE needs a
+  // re-fetch without Range, which filePrepare() handles (it stops on status 200).
+  let expected = 0;
+  for (const error of ['SERVER_FORBIDDEN', 'SERVER_UNAUTHORIZED', 'SERVER_NO_RANGE', 'NETWORK_INVALID_REQUEST']) {
+    expected++;
+    assert.equal(await interrupted(error), expected, `${error} should open the fallback tab`);
+  }
+  // Fatal: disk and network faults would fail identically in the video tab.
+  for (const error of ['FILE_NO_SPACE', 'NETWORK_TIMEOUT', 'FILE_TOO_LARGE', 'USER_CANCELED', 'FILE_ACCESS_DENIED', 'CRASH']) {
+    assert.equal(await interrupted(error), expected, `${error} must not open a doomed retry tab`);
   }
   assert.equal(h.records.dl_8, undefined, 'download records are always cleaned up');
 });
@@ -352,81 +358,90 @@ test('MAIN-world media controls ignore malformed commands without claiming authe
   assert.equal(media.playbackRate, 16);
 });
 
-test('MAIN-world capture caps retained Blobs and drops them when the page revokes the URL', () => {
-  const messages = [];
-  const revoked = [];
-  class FakeURL extends URL {
-    static createObjectURL() { return 'blob:' + (FakeURL.next++); }
-    static revokeObjectURL(url) { revoked.push(url); }
+// Shared MAIN-world sandbox for inject.js: fake URL/Blob so ids and revocations
+// are observable, and a synchronous setTimeout so the throttled post() flushes.
+function mainWorld({ blobSize } = {}) {
+  const saved = [], messages = [];
+  class FakeBlob {
+    constructor(parts, opts = {}) {
+      this.type = opts.type || '';
+      this.size = blobSize != null ? blobSize : parts.reduce((n, p) => n + (p.byteLength || p.size || 0), 0);
+    }
   }
-  FakeURL.next = 0;
-  const window = {
-    addEventListener: (name, fn) => { window.listeners[name] = fn; },
-    postMessage: (m) => messages.push(m),
-    listeners: {},
-  };
-  const context = vm.createContext({
-    window, URL: FakeURL,
-    Blob: class { constructor(parts, opts = {}) { this.type = opts.type || ''; this.size = parts.reduce((n, p) => n + (p.byteLength || p.size || 0), 0); } },
-    document: { addEventListener() {}, querySelectorAll: () => [], documentElement: {} },
-    // post() throttles through setTimeout; flush synchronously so state is observable.
-    setTimeout: (fn) => { fn(); return 0; },
-  });
-  vm.runInContext(fs.readFileSync('inject.js', 'utf8'), context);
-  const blobOf = (size) => new context.Blob([new Uint8Array(size)], { type: 'video/mp4' });
-  const state = () => messages[messages.length - 1].state.blobs;
-
-  const big = FakeURL.createObjectURL(blobOf(400 * 1024 * 1024));
-  FakeURL.createObjectURL(blobOf(400 * 1024 * 1024)); // 800 MB total -> over the 512 MB cap
-  assert.equal(state().length, 1, 'the cap is enforced');
-  assert.deepEqual(state().map((b) => b.id), [0]);
-
-  // Revoking frees the budget, and the entry is removed rather than hidden.
-  context.URL.revokeObjectURL(big);
-  assert.deepEqual(revoked, [big]);
-  assert.equal(state().length, 0, 'a revoked Blob is dropped');
-  context.URL.createObjectURL(blobOf(400 * 1024 * 1024));
-  assert.equal(state().length, 1, 'budget is released after revocation');
-  assert.deepEqual(state().map((b) => b.id), [1], 'ids stay monotonic across removals');
-});
-
-test('MAIN-world save-blob still resolves by id after earlier Blobs are revoked', () => {
-  const saved = [];
-  const window = { addEventListener: (n, f) => { window.listeners[n] = f; }, listeners: {} };
-  class FakeBlob { constructor(parts, opts = {}) { this.type = opts.type || ''; this.size = 1; } }
   class FakeURL extends URL {
     static createObjectURL(obj) {
       if (obj instanceof FakeBlob) saved.push(obj);
-      return 'blob:x' + (FakeURL.next++);
+      return 'blob:' + (FakeURL.next++);
     }
     static revokeObjectURL() {}
   }
   FakeURL.next = 0;
+  const window = {
+    addEventListener: (n, f) => { window.listeners[n] = f; },
+    postMessage: (m) => messages.push(m),
+    listeners: {},
+  };
   const context = vm.createContext({
     window, URL: FakeURL, Blob: FakeBlob,
     document: {
       addEventListener() {}, querySelectorAll: () => [],
-      body: { appendChild() {} },
+      body: { appendChild() {} }, documentElement: {},
       createElement: () => ({ style: {}, click() {}, remove() {} }),
     },
     setTimeout: (fn) => { fn(); return 0; },
   });
   vm.runInContext(fs.readFileSync('inject.js', 'utf8'), context);
+  return {
+    context, window, saved, messages,
+    blobs: () => (messages.length ? messages[messages.length - 1].state.blobs : []),
+    cmd: (data) => window.listeners.message({ source: window, data }),
+  };
+}
 
-  // Two Blobs; revoke the first so array indices no longer equal ids.
-  const first = FakeURL.createObjectURL(new FakeBlob([], { type: 'video/mp4' }));
-  FakeURL.createObjectURL(new FakeBlob([], { type: 'video/mp4' }));
-  context.URL.revokeObjectURL(first);
-  const survivor = saved[saved.length - 1];
+test('MAIN-world capture keeps a Blob saveable after the page revokes its URL', () => {
+  const w = mainWorld();
+  const url = w.context.URL.createObjectURL(new w.context.Blob([], { type: 'video/mp4' }));
+  assert.equal(w.blobs().length, 1);
 
-  saved.length = 0;
-  window.listeners.message({ source: window, data: { __mdlCmd: 'save-blob', id: 1, name: 'clip' } });
-  assert.deepEqual(saved, [survivor], 'id 1 must still resolve to the surviving Blob');
+  // Players revoke as soon as the media element has loaded. The capture must survive.
+  w.context.URL.revokeObjectURL(url);
+  assert.equal(w.blobs().length, 1, 'revocation must not drop a still-saveable capture');
 
-  // The revoked id must not resolve to whatever now sits at that array index.
-  saved.length = 0;
-  window.listeners.message({ source: window, data: { __mdlCmd: 'save-blob', id: 0, name: 'clip' } });
-  assert.deepEqual(saved, [], 'a revoked Blob is not saveable');
+  const blob = w.saved[w.saved.length - 1];
+  w.saved.length = 0;
+  w.cmd({ __mdlCmd: 'save-blob', id: 0, name: 'clip' });
+  assert.deepEqual(w.saved, [blob], 'the Blob is still saved, through a freshly minted URL');
+});
+
+test('MAIN-world capture caps retained Blobs by evicting the oldest', () => {
+  const w = mainWorld({ blobSize: 400 * 1024 * 1024 });
+  w.context.URL.createObjectURL(new w.context.Blob([], { type: 'video/mp4' })); // id 0
+  w.context.URL.createObjectURL(new w.context.Blob([], { type: 'video/mp4' })); // id 1, now 800 MB
+  assert.deepEqual(w.blobs().map((b) => b.id), [1], 'the oldest entry is evicted to stay under the cap');
+
+  w.context.URL.createObjectURL(new w.context.Blob([], { type: 'video/mp4' })); // id 2, still 800 MB
+  assert.deepEqual(w.blobs().map((b) => b.id), [2], 'memory stays bounded across many captures');
+
+  // An over-cap Blob is skipped rather than evicting everything else.
+  const w2 = mainWorld({ blobSize: 600 * 1024 * 1024 });
+  w2.context.URL.createObjectURL(new w2.context.Blob([], { type: 'video/mp4' }));
+  assert.deepEqual(w2.blobs(), [], 'a single Blob larger than the cap is not retained');
+});
+
+test('MAIN-world save-blob resolves by id, and stale ids save nothing', () => {
+  const w = mainWorld();
+  const a = w.context.URL.createObjectURL(new w.context.Blob([], { type: 'video/mp4' })); // id 0
+  w.context.URL.createObjectURL(new w.context.Blob([], { type: 'video/mp4' }));           // id 1
+  w.context.URL.revokeObjectURL(a); // id 0 becomes a dead handle but keeps its capture
+
+  const second = w.saved[w.saved.length - 1];
+  w.saved.length = 0;
+  w.cmd({ __mdlCmd: 'save-blob', id: 1, name: 'clip' });
+  assert.deepEqual(w.saved, [second], 'id 1 resolves to the right Blob');
+
+  w.saved.length = 0;
+  w.cmd({ __mdlCmd: 'save-blob', id: 99, name: 'clip' });
+  assert.deepEqual(w.saved, [], 'an unknown id saves nothing');
 });
 
 // --- HLS / DASH parsers (previously untested: this is where the AES-CBC padding bug hid)

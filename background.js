@@ -11,9 +11,10 @@ const MIN_FILE_SIZE = 512 * 1024;
 const SEGMENT_RE = /\.(m4s|ts|m4f|cmfv|cmfa|aac)(\?|#|$)/i;
 // Headers that are browser plumbing, not auth — never replayed.
 const SKIP_HDR = /^(host|connection|accept|accept-encoding|accept-language|range|content-length|content-type|cache-control|pragma|priority|dnt|te|upgrade-insecure-requests|if-.*|sec-.*)$/;
-// Download interruptions that mean "the server refused us", which the page-fetch
-// fallback can fix. Everything else (disk, network, size) would fail there too.
-const RETRYABLE_DL_ERROR = /^(SERVER_FORBIDDEN|SERVER_UNAUTHORIZED|NETWORK_INVALID_REQUEST)$/;
+// Download interruptions the page-fetch fallback can recover from. Refusals need
+// the page's own session; SERVER_NO_RANGE needs re-fetching without Range. Disk
+// and network failures would fail there too, so they are excluded.
+const RETRYABLE_DL_ERROR = /^(SERVER_FORBIDDEN|SERVER_UNAUTHORIZED|SERVER_NO_RANGE|NETWORK_INVALID_REQUEST)$/;
 
 function classify(url, ct = '') {
   const u = url.toLowerCase();

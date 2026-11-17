@@ -88,35 +88,38 @@
   document.addEventListener('encrypted', markEme, true);
 
   // Like the track buffer above, retained Blobs are capped so a long session
-  // cannot exhaust memory. Revoking a URL drops its entry below.
+  // cannot exhaust memory. Memory stays bounded by evicting the oldest entries.
   const BLOB_CAP = 512 * 1024 * 1024;
   let blobBytes = 0;
   let blobSeq = 0;
+  const evictBlobs = () => {
+    while (blobBytes > BLOB_CAP && S.blobs.length) {
+      blobBytes -= S.blobs.shift().size || 0;
+    }
+  };
   URL.createObjectURL = function (obj) {
     const url = origCreateURL.apply(this, arguments);
     try {
-      if (obj instanceof Blob && /^(video|audio)\//i.test(obj.type)) {
-        if (blobBytes + obj.size <= BLOB_CAP) {
-          // ids are monotonic: entries are removed when their URL is revoked.
-          S.blobs.push({ id: blobSeq++, blob: obj, url, size: obj.size });
-          blobBytes += obj.size;
-          post();
-        }
+      if (obj instanceof Blob && /^(video|audio)\//i.test(obj.type) && obj.size <= BLOB_CAP) {
+        // ids are monotonic: entries can be evicted, so an id never changes meaning.
+        S.blobs.push({ id: blobSeq++, blob: obj, url, size: obj.size });
+        blobBytes += obj.size;
+        evictBlobs();
+        post();
       }
     } catch (e) {}
     return url;
   };
 
-  // A revoked URL can never be saved again, so drop it with its buffer.
+  // Revoking an object URL only invalidates that handle. The Blob itself stays
+  // valid and saveable (saveBlob mints a fresh URL), and players routinely
+  // revoke as soon as the media element has loaded, so this must NOT drop the
+  // capture. Only the dead handle is cleared.
   const origRevokeURL = URL.revokeObjectURL;
   URL.revokeObjectURL = function (url) {
     try {
-      const i = S.blobs.findIndex((b) => b.url === url);
-      if (i !== -1) {
-        blobBytes -= S.blobs[i].size || 0;
-        S.blobs.splice(i, 1);
-        post();
-      }
+      const b = S.blobs.find((x) => x.url === url);
+      if (b) b.url = null;
     } catch (e) {}
     return origRevokeURL.apply(this, arguments);
   };
