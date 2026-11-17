@@ -98,8 +98,9 @@ function tick() {
   const bar = $('#bar');
   if (prog.live) bar.removeAttribute('value');
   else {
+    // Stopping leaves planned items unfetched, so clamp instead of overflowing.
     bar.max = prog.total || 1;
-    bar.value = prog.done;
+    bar.value = Math.min(prog.done, prog.total || prog.done);
   }
   $('#stat').textContent = `${prog.done}${prog.total && !prog.live ? ' / ' + prog.total : ''} ${KIND === 'file' ? 'chunks' : 'segments'} · ${fmt(prog.bytes)}${fetcher.mode === 'page' ? ' · via video tab' : ''}`;
 }
@@ -246,7 +247,9 @@ function attrs(s) {
 }
 function parseBR(s, prevEnd) {
   const [len, off] = s.split('@').map(Number);
+  if (!Number.isSafeInteger(len) || len <= 0) throw new Error('Invalid HLS byte range length');
   const start = Number.isFinite(off) ? off : prevEnd;
+  if (!Number.isSafeInteger(start) || start < 0) throw new Error('Invalid HLS byte range offset');
   return [start, start + len - 1];
 }
 
@@ -443,13 +446,13 @@ async function hlsTrack(t, suffix) {
     if (!keys.has(uri)) {
       keys.set(uri, get(uri).then((b) => {
         if (b.byteLength !== 16) throw new Error(`AES key is ${b.byteLength} bytes, expected 16 (the key server probably returned an error page; play the video in its tab and try again)`);
-        return crypto.subtle.importKey('raw', b, 'AES-CBC', false, ['decrypt']);
+        return crypto.subtle.importKey('raw', b, 'AES-CBC', false, ['decrypt', 'encrypt']);
       }).catch((e) => { keys.delete(uri); throw e; })); // don't cache a failure
     }
     return keys.get(uri);
   };
   const dec = async (data, k, seq) =>
-    k ? new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-CBC', iv: ivFor(k, seq) }, await keyFor(k.uri), data)) : data;
+    k ? await aesCbcDecrypt(await keyFor(k.uri), ivFor(k, seq), data) : data;
 
   const batch = async (segs) => {
     for (const s of segs) {
@@ -464,6 +467,9 @@ async function hlsTrack(t, suffix) {
       prog.bytes += out[i].byteLength;
       tick();
     });
+    // A stopped pool leaves planned segments unfetched; never report >100%.
+    if (stopFlag) prog.total = prog.done;
+    tick();
     for (let i = 0; i < segs.length && out[i]; i++) {
       const m = segs[i].map;
       if (m) {

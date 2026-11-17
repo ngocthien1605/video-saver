@@ -1,8 +1,20 @@
 // Run: node test.js   (no framework; loads the extension's classic scripts into one shared context)
 const assert = require('assert'), vm = require('vm'), fs = require('fs'), cp = require('child_process');
-const ctx = vm.createContext({ console, URL, TextDecoder });
+const nodeCrypto = require('crypto');
+const ctx = vm.createContext({ console, URL, TextDecoder, crypto: nodeCrypto.webcrypto });
 for (const f of ['common.js', 'captures.js', 'replay.js', 'fetcher.js', 'ytdlp.js']) vm.runInContext(fs.readFileSync(f, 'utf8'), ctx, { filename: f });
 const g = (n) => vm.runInContext(n, ctx);
+// downloader.js needs a DOM and chrome APIs, so only its pure parser helpers are
+// loaded here. They are shared by the DASH and HLS tests below.
+const downloaderSource = fs.readFileSync('downloader.js', 'utf8');
+const sliceBetween = (start, end) => downloaderSource.slice(downloaderSource.indexOf(start), downloaderSource.indexOf(end));
+vm.runInContext(
+  sliceBetween('function attrs(', 'async function hlsPrepare') +
+    sliceBetween('function isoDur(', 'function parseMPD') +
+    sliceBetween('function segmentsFor(', 'async function dashPrepare'),
+  ctx,
+  { filename: 'downloader.js#parsers' },
+);
 const tests = [];
 const test = (name, fn) => tests.push([name, fn]);
 
@@ -210,7 +222,7 @@ function backgroundHarness(initial = {}) {
   const records = JSON.parse(JSON.stringify(initial)), rules = new Map(), warnings = [];
   const event = () => ({listeners: [], addListener(fn) {this.listeners.push(fn);}, emit(...args) {return this.listeners.map(fn => fn(...args));}});
   const webRequest = Object.fromEntries(['onSendHeaders','onHeadersReceived','onErrorOccurred','onCompleted'].map(n => [n,event()]));
-  let failStore = false, failRemoval = false;
+  let failStore = false, failRemoval = false, downloadState = ['complete'], createdTabs = 0;
   const changed = event();
   const chrome = {
     storage: {session: {
@@ -228,15 +240,17 @@ function backgroundHarness(initial = {}) {
     runtime: {onMessage:event(),getURL:s=>'chrome-extension://synthetic/'+s},
     downloads: {
       download:async()=>{ changed.emit({id:8,state:{current:'complete'}}); return 8; },
-      search:async()=>[{id:8,state:'complete'}],
+      search:async()=>[{id:8,state:downloadState[0],error:downloadState[1]}],
       onChanged:changed,
     },
-    tabs: {onUpdated:event(),onRemoved:event(),get:async()=>{throw Error('tab closed');},create:async()=>({id:99})},
+    tabs: {onUpdated:event(),onRemoved:event(),get:async()=>{throw Error('tab closed');},create:async()=>{createdTabs++;return {id:99};}},
   };
-  const context = vm.createContext({chrome, URL, console:{warn:(...a)=>warnings.push(a)}});
+  const context = vm.createContext({chrome, URL, URLSearchParams, console:{warn:(...a)=>warnings.push(a)}});
   context.importScripts = (...names) => {for (const name of names) vm.runInContext(fs.readFileSync(name,'utf8'), context, {filename:name});};
   vm.runInContext(fs.readFileSync('background.js','utf8'), context, {filename:'background.js'});
   return {records,rules,chrome,warnings,run:s=>vm.runInContext(s,context),
+    createdTabs:()=>createdTabs,
+    downloadState:(state,error)=>{downloadState=[state,error];},
     failStore:()=>{failStore=true;}, failRemoval:value=>{failRemoval=value;}};
 }
 test('background tolerates lost request headers and malformed page messages', async () => {
@@ -263,6 +277,23 @@ test('background cleans completed downloads even when completion precedes record
   await assert.rejects(h.run("directDownload({url:'https://media.example/v.mp4',filename:'v.mp4',tabId:7})"), /quota/);
   assert.equal(h.rules.size, 0, 'storage failure must remove installed rules');
 });
+test('background only retries refusals through the video tab, never disk or network failures', async () => {
+  const h = backgroundHarness();
+  await h.run('recovery');
+  const interrupted = async (error) => {
+    h.records.dl_8 = {rids: [], url: 'https://media.example/v.mp4', tabId: 7, title: 'v', ext: 'mp4'};
+    h.downloadState('interrupted', error);
+    await h.run('settle(8)');
+    return h.createdTabs();
+  };
+  assert.equal(await interrupted('SERVER_FORBIDDEN'), 1, 'a refusal opens the fallback tab');
+  assert.equal(await interrupted('SERVER_UNAUTHORIZED'), 2);
+  for (const error of ['FILE_NO_SPACE', 'NETWORK_TIMEOUT', 'FILE_TOO_LARGE', 'USER_CANCELED', 'SERVER_NO_RANGE']) {
+    assert.equal(await interrupted(error), 2, `${error} must not open a doomed retry tab`);
+  }
+  assert.equal(h.records.dl_8, undefined, 'download records are always cleaned up');
+});
+
 test('background recovery retries rule cleanup and removes orphaned tab records', async () => {
   const h = backgroundHarness({dl_8:{rids:[41],url:'https://media.example/v.mp4'},rules_99:[42]});
   await h.run('recovery');
@@ -291,10 +322,6 @@ test('DASH rejects non-finite and excessive counts before allocating segments', 
   assert.equal(count(1), 1);
   assert.equal(count(1000000), 1000000);
   // Exercise the actual segment builder with small fake XML nodes.
-  const source = fs.readFileSync('downloader.js','utf8');
-  const helpers = source.slice(source.indexOf('const kids ='), source.indexOf('function parseMPD'));
-  const builder = source.slice(source.indexOf('function segmentsFor'), source.indexOf('async function dashPrepare'));
-  vm.runInContext(helpers + builder, ctx);
   const node = (name, attrs={}, children=[]) => ({
     localName:name, children,
     attributes:Object.entries(attrs).map(([name,value])=>({name,value:String(value)})),
@@ -323,6 +350,187 @@ test('MAIN-world media controls ignore malformed commands without claiming authe
   listeners.message({source:window,data:{__mdlCmd:'turbo'}});
   assert.equal(media.muted, true);
   assert.equal(media.playbackRate, 16);
+});
+
+test('MAIN-world capture caps retained Blobs and drops them when the page revokes the URL', () => {
+  const messages = [];
+  const revoked = [];
+  class FakeURL extends URL {
+    static createObjectURL() { return 'blob:' + (FakeURL.next++); }
+    static revokeObjectURL(url) { revoked.push(url); }
+  }
+  FakeURL.next = 0;
+  const window = {
+    addEventListener: (name, fn) => { window.listeners[name] = fn; },
+    postMessage: (m) => messages.push(m),
+    listeners: {},
+  };
+  const context = vm.createContext({
+    window, URL: FakeURL,
+    Blob: class { constructor(parts, opts = {}) { this.type = opts.type || ''; this.size = parts.reduce((n, p) => n + (p.byteLength || p.size || 0), 0); } },
+    document: { addEventListener() {}, querySelectorAll: () => [], documentElement: {} },
+    // post() throttles through setTimeout; flush synchronously so state is observable.
+    setTimeout: (fn) => { fn(); return 0; },
+  });
+  vm.runInContext(fs.readFileSync('inject.js', 'utf8'), context);
+  const blobOf = (size) => new context.Blob([new Uint8Array(size)], { type: 'video/mp4' });
+  const state = () => messages[messages.length - 1].state.blobs;
+
+  const big = FakeURL.createObjectURL(blobOf(400 * 1024 * 1024));
+  FakeURL.createObjectURL(blobOf(400 * 1024 * 1024)); // 800 MB total -> over the 512 MB cap
+  assert.equal(state().length, 1, 'the cap is enforced');
+  assert.deepEqual(state().map((b) => b.id), [0]);
+
+  // Revoking frees the budget, and the entry is removed rather than hidden.
+  context.URL.revokeObjectURL(big);
+  assert.deepEqual(revoked, [big]);
+  assert.equal(state().length, 0, 'a revoked Blob is dropped');
+  context.URL.createObjectURL(blobOf(400 * 1024 * 1024));
+  assert.equal(state().length, 1, 'budget is released after revocation');
+  assert.deepEqual(state().map((b) => b.id), [1], 'ids stay monotonic across removals');
+});
+
+test('MAIN-world save-blob still resolves by id after earlier Blobs are revoked', () => {
+  const saved = [];
+  const window = { addEventListener: (n, f) => { window.listeners[n] = f; }, listeners: {} };
+  class FakeBlob { constructor(parts, opts = {}) { this.type = opts.type || ''; this.size = 1; } }
+  class FakeURL extends URL {
+    static createObjectURL(obj) {
+      if (obj instanceof FakeBlob) saved.push(obj);
+      return 'blob:x' + (FakeURL.next++);
+    }
+    static revokeObjectURL() {}
+  }
+  FakeURL.next = 0;
+  const context = vm.createContext({
+    window, URL: FakeURL, Blob: FakeBlob,
+    document: {
+      addEventListener() {}, querySelectorAll: () => [],
+      body: { appendChild() {} },
+      createElement: () => ({ style: {}, click() {}, remove() {} }),
+    },
+    setTimeout: (fn) => { fn(); return 0; },
+  });
+  vm.runInContext(fs.readFileSync('inject.js', 'utf8'), context);
+
+  // Two Blobs; revoke the first so array indices no longer equal ids.
+  const first = FakeURL.createObjectURL(new FakeBlob([], { type: 'video/mp4' }));
+  FakeURL.createObjectURL(new FakeBlob([], { type: 'video/mp4' }));
+  context.URL.revokeObjectURL(first);
+  const survivor = saved[saved.length - 1];
+
+  saved.length = 0;
+  window.listeners.message({ source: window, data: { __mdlCmd: 'save-blob', id: 1, name: 'clip' } });
+  assert.deepEqual(saved, [survivor], 'id 1 must still resolve to the surviving Blob');
+
+  // The revoked id must not resolve to whatever now sits at that array index.
+  saved.length = 0;
+  window.listeners.message({ source: window, data: { __mdlCmd: 'save-blob', id: 0, name: 'clip' } });
+  assert.deepEqual(saved, [], 'a revoked Blob is not saveable');
+});
+
+// --- HLS / DASH parsers (previously untested: this is where the AES-CBC padding bug hid)
+const M3U8_BASE = 'https://media.example/hls/master.m3u8';
+const MEDIA_PLAYLIST = [
+  '#EXTM3U',
+  '#EXT-X-VERSION:7',
+  '#EXT-X-TARGETDURATION:6',
+  '#EXT-X-MEDIA-SEQUENCE:10',
+  '#EXT-X-PLAYLIST-TYPE:VOD',
+  '#EXT-X-KEY:METHOD=AES-128,URI="https://media.example/key.bin",IV=0x0123456789ABCDEF0123456789ABCDEF',
+  '#EXT-X-MAP:URI="init.mp4",BYTERANGE="800@0"',
+  '#EXTINF:6.0,',
+  'seg10.m4s',
+  '#EXTINF:6.0,',
+  '#EXT-X-BYTERANGE:1000@900',
+  'seg11.m4s',
+  '#EXT-X-ENDLIST',
+].join('\n');
+
+test('parseM3U8 resolves keys, maps, byte ranges and sequence numbers', () => {
+  const pl = g('parseM3U8')(MEDIA_PLAYLIST, M3U8_BASE);
+  assert.equal(pl.variants.length, 0);
+  assert.equal(pl.segments.length, 2);
+  assert.equal(pl.vod, true);
+  assert.equal(pl.end, true);
+  assert.equal(pl.target, 6);
+  assert.equal(pl.segments[0].uri, 'https://media.example/hls/seg10.m4s');
+  assert.equal(pl.segments[0].seq, 10);
+  assert.equal(pl.segments[1].seq, 11);
+  assert.deepEqual(pl.segments[1].br, [900, 1899], 'implicit byte range continues from the previous one');
+  assert.equal(pl.segments[0].map.uri, 'https://media.example/hls/init.mp4');
+  assert.deepEqual(pl.segments[0].map.br, [0, 799]);
+  assert.equal(pl.segments[0].key.method, 'AES-128');
+  assert.equal(pl.segments[1].key.uri, 'https://media.example/key.bin', 'keys carry to following segments');
+});
+
+test('parseM3U8 separates variants, renditions and DRM keys', () => {
+  const master = [
+    '#EXTM3U',
+    '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",NAME="English",DEFAULT=YES,URI="audio/en.m3u8"',
+    '#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",URI="subs/en.m3u8"',
+    '#EXT-X-SESSION-KEY:METHOD=SAMPLE-AES,URI="skd://key"',
+    '#EXT-X-STREAM-INF:BANDWIDTH=4000000,AVERAGE-BANDWIDTH=3500000,RESOLUTION=1920x1080,CODECS="avc1.64"',
+    'v1080/index.m3u8',
+    '#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360',
+    'v360/index.m3u8',
+  ].join('\n');
+  const pl = g('parseM3U8')(master, M3U8_BASE);
+  assert.equal(pl.variants.length, 2);
+  assert.deepEqual(pl.variants.map((v) => v.uri), [
+    'https://media.example/hls/v1080/index.m3u8',
+    'https://media.example/hls/v360/index.m3u8',
+  ]);
+  assert.equal(pl.variants[0].RESOLUTION, '1920x1080');
+  assert.equal(pl.media.length, 2);
+  assert.equal(pl.media[0].URI, 'https://media.example/hls/audio/en.m3u8');
+  assert.equal(pl.sessionKeys.length, 1);
+  assert.equal(g('isDRMAttrs')(pl.sessionKeys[0]), true, 'SAMPLE-AES is refused, not decrypted');
+  assert.equal(g('isDRMAttrs')({ METHOD: 'AES-128', KEYFORMAT: 'identity' }), false);
+});
+
+test('parseM3U8 rejects non-playlists and malformed byte ranges instead of guessing', () => {
+  assert.throws(() => g('parseM3U8')('<html>error</html>', M3U8_BASE), /Not an M3U8 playlist/);
+  assert.throws(() => g('parseBR')('abc', 0), /byte range/);
+  assert.throws(() => g('parseBR')('0@0', 0), /byte range/);
+  assert.throws(() => g('parseBR')('100', -5), /offset/);
+  assert.deepEqual(g('parseBR')('100', 40), [40, 139]);
+});
+
+test('ivFor uses the explicit IV, else the media sequence as a big-endian 64-bit suffix', () => {
+  const hex = (u8) => Buffer.from(u8).toString('hex');
+  assert.equal(hex(g('ivFor')({ iv: '0x0123456789ABCDEF0123456789ABCDEF' }, 99)), '0123456789abcdef0123456789abcdef');
+  assert.equal(hex(g('ivFor')({}, 1)), '00000000000000000000000000000001');
+  assert.equal(hex(g('ivFor')({}, 258)), '00000000000000000000000000000102');
+  assert.equal(hex(g('ivFor')({ iv: '1f' }, 7)), '0000000000000000000000000000001f', 'short IVs are left-padded');
+});
+
+test('isoDur parses ISO-8601 durations and ignores junk', () => {
+  const d = g('isoDur');
+  assert.equal(d('PT1H2M3S'), 3723);
+  assert.equal(d('P1DT1S'), 86401);
+  assert.equal(d('PT0.5S'), 0.5);
+  assert.equal(d(''), 0);
+  assert.equal(d(null), 0);
+  assert.equal(d('garbage'), 0);
+});
+
+test('aes-128 HLS: PKCS#7 and unpadded CBC segments both decrypt intact', async () => {
+  const decrypt = g('aesCbcDecrypt'), subtle = nodeCrypto.webcrypto.subtle;
+  const raw = nodeCrypto.randomBytes(16), iv = nodeCrypto.randomBytes(16);
+  const key = await subtle.importKey('raw', raw, 'AES-CBC', false, ['decrypt', 'encrypt']);
+  const padded = (p) => { const c = nodeCrypto.createCipheriv('aes-128-cbc', raw, iv); return Buffer.concat([c.update(p), c.final()]); };
+  const rawBlocks = (p) => { const c = nodeCrypto.createCipheriv('aes-128-cbc', raw, iv); c.setAutoPadding(false); return Buffer.concat([c.update(p), c.final()]); };
+  // Deterministic payloads: a trailing byte above 0x10 is unambiguously not PKCS#7.
+  // (Random bytes can accidentally end in valid-looking padding, which no
+  // implementation can distinguish from a real padded stream.)
+  for (const size of [16, 1024, 1504]) {
+    const plain = Buffer.alloc(size, 0x41);
+    assert.deepEqual(Buffer.from(await decrypt(key, iv, padded(plain))), plain, `padded ${size}`);
+    assert.deepEqual(Buffer.from(await decrypt(key, iv, rawBlocks(plain))), plain, `unpadded ${size}`);
+  }
+  // A truncated (non block-aligned) segment must fail loudly, not return partial data.
+  await assert.rejects(decrypt(key, iv, nodeCrypto.randomBytes(24)), /OperationError|operation/);
 });
 
 test('PowerShell quoting escapes every Unicode single-quote delimiter', () => {

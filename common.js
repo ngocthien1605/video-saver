@@ -37,6 +37,30 @@ function queueTask(queues, key, fn) {
   return next;
 }
 
+// HLS AES-128 (RFC 8216) is AES-CBC with PKCS#7 padding, and WebCrypto always
+// strips that padding. Some packagers emit the same CBC blocks without it, which
+// makes WebCrypto reject the final block. Retry with one appended ciphertext block
+// whose plaintext is a full pad block: decryption then succeeds and the unpad step
+// consumes only that synthetic block, leaving the real plaintext intact.
+async function aesCbcDecrypt(key, iv, data) {
+  const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
+  try {
+    return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-CBC', iv }, key, bytes));
+  } catch (e) {
+    if (e.name !== 'OperationError' || !bytes.length || bytes.length % 16) throw e;
+    // C' = AES(lastBlock XOR pad16); CBC chaining makes lastBlock the IV.
+    const pad = new Uint8Array(16).fill(16);
+    const last = bytes.subarray(bytes.length - 16);
+    const extra = new Uint8Array(
+      await crypto.subtle.encrypt({ name: 'AES-CBC', iv: last }, key, pad)
+    ).subarray(0, 16);
+    const joined = new Uint8Array(bytes.length + 16);
+    joined.set(bytes);
+    joined.set(extra, bytes.length);
+    return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-CBC', iv }, key, joined));
+  }
+}
+
 function segmentCount(value) {
   // A corrupt timeline must not create an infinite loop or an enormous array.
   if (!Number.isSafeInteger(value) || value <= 0 || value > 1e6) throw new Error('Invalid or excessive DASH segment count');

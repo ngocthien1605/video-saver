@@ -87,15 +87,38 @@
   }
   document.addEventListener('encrypted', markEme, true);
 
+  // Like the track buffer above, retained Blobs are capped so a long session
+  // cannot exhaust memory. Revoking a URL drops its entry below.
+  const BLOB_CAP = 512 * 1024 * 1024;
+  let blobBytes = 0;
+  let blobSeq = 0;
   URL.createObjectURL = function (obj) {
     const url = origCreateURL.apply(this, arguments);
     try {
       if (obj instanceof Blob && /^(video|audio)\//i.test(obj.type)) {
-        S.blobs.push({ id: S.blobs.length, blob: obj, url });
-        post();
+        if (blobBytes + obj.size <= BLOB_CAP) {
+          // ids are monotonic: entries are removed when their URL is revoked.
+          S.blobs.push({ id: blobSeq++, blob: obj, url, size: obj.size });
+          blobBytes += obj.size;
+          post();
+        }
       }
     } catch (e) {}
     return url;
+  };
+
+  // A revoked URL can never be saved again, so drop it with its buffer.
+  const origRevokeURL = URL.revokeObjectURL;
+  URL.revokeObjectURL = function (url) {
+    try {
+      const i = S.blobs.findIndex((b) => b.url === url);
+      if (i !== -1) {
+        blobBytes -= S.blobs[i].size || 0;
+        S.blobs.splice(i, 1);
+        post();
+      }
+    } catch (e) {}
+    return origRevokeURL.apply(this, arguments);
   };
 
   const extFor = (mime) => {
@@ -140,7 +163,7 @@
       const kind = /^audio/i.test(t.mime) ? 'audio' : 'video';
       saveBlob(new Blob(t.chunks, { type: t.mime.split(';')[0] }), `${base}.${kind}${t.id}.${extFor(t.mime)}`);
     } else if (m.__mdlCmd === 'save-blob') {
-      const b = S.blobs[m.id];
+      const b = S.blobs.find((x) => x.id === m.id);
       if (b && !S.eme) saveBlob(b.blob, `${base}.${extFor(b.blob.type)}`);
     } else if (m.__mdlCmd === 'turbo') {
       for (const v of document.querySelectorAll('video, audio')) {

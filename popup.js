@@ -102,7 +102,7 @@ async function exportCookies(it) {
   const id = await chrome.downloads.download({
     url: 'data:text/plain;charset=utf-8,' + encodeURIComponent(lines.join('\n') + '\n'),
     filename: 'stream-saver-cookies.txt',
-    conflictAction: 'overwrite',
+    conflictAction: 'uniquify',
     saveAs: false,
   });
   for (let i = 0; i < 30; i++) {
@@ -111,7 +111,10 @@ async function exportCookies(it) {
     if (d && d.state === 'interrupted') throw new Error('Could not save cookies file: ' + d.error);
     await sleep(100);
   }
-  return 'stream-saver-cookies.txt';
+  // Uniquify may have chosen a different name; never hand yt-dlp a path we did not confirm.
+  const [last] = await chrome.downloads.search({ id });
+  if (last && last.filename) return last.filename;
+  throw new Error('Could not confirm where the cookies file was saved');
 }
 
 async function ytdlp(it, btn) {
